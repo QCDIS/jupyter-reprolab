@@ -1,0 +1,39 @@
+# Virtual environments
+my_venv/
+.my_venv/
+*venv*/
+*env*/
+
+# Development files
+reprolab_data/
+node_modules/
+dist/
+build/
+*.egg-info/
+.git/
+.gitignore
+.DS_Store
+.idea/
+.ipynb_checkpoints/
+.virtual_documents/
+.yarn/
+.yarnrc.yml
+.prettierignore
+.copier-answers.yml
+
+# Test files and notebooks
+*.ipynb
+test_*.ipynb
+demo*.ipynb
+Untitled*.ipynb
+books.csv
+demo.md
+demo2.ipynb
+
+# Build artifacts
+lib/
+tsconfig.tsbuildinfo
+package-lock.json
+
+# GitHub
+.github/ 
