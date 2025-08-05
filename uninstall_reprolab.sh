@@ -65,6 +65,10 @@ if command_exists jupyter; then
     else
         print_warning "Reprolab Jupyter Lab extension not found"
     fi
+    
+    # Also try to disable the extension
+    print_status "Disabling Jupyter Lab extension..."
+    jupyter labextension disable reprolab 2>/dev/null || print_warning "Could not disable extension"
 else
     print_warning "jupyter not found, skipping Jupyter Lab extension uninstall"
 fi

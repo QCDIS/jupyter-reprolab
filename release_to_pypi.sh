@@ -39,7 +39,9 @@ rm -rf dist/ build/ *.egg-info/
 
 # Build the frontend extension
 echo "🔨 Building frontend extension..."
-./install.sh
+yarn install
+yarn build:lib:prod
+jupyter labextension build .
 
 # Create clean build directory
 echo "📁 Creating clean build directory..."

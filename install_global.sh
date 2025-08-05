@@ -37,11 +37,11 @@ if ! python3 -c "import jupyterlab" &> /dev/null; then
     exit 1
 fi
 
-echo "🧶 Installing yarn dependencies..."
-yarn install
+echo "🧶 Installing dependencies..."
+jlpm install
 
 echo "🔨 Building the extension..."
-yarn build:lib:prod
+jlpm build:lib:prod
 jupyter labextension build .
 
 echo "🐍 Installing Python package globally..."
@@ -51,6 +51,15 @@ echo "🔓 Enabling ReproLab extension..."
 jupyter labextension enable reprolab
 
 echo "✅ ReproLab global installation completed successfully!"
+echo ""
+echo "🔍 Verifying installation..."
+if [ -d "/opt/homebrew/anaconda3/share/jupyter/labextensions/reprolab" ]; then
+    echo "✅ ReproLab extension is installed and enabled"
+else
+    echo "❌ ReproLab extension installation verification failed"
+    exit 1
+fi
+
 echo ""
 echo "To start JupyterLab with ReproLab from any directory:"
 echo "  jupyter lab"
