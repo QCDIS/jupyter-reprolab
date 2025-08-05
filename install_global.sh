@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# ReproLab Installation Script
-# This script builds and installs the ReproLab JupyterLab extension
+# ReproLab Global Installation Script
+# This script builds and installs the ReproLab JupyterLab extension globally
 
 set -e
 
-echo "🚀 Installing ReproLab JupyterLab Extension..."
+echo "🚀 Installing ReproLab JupyterLab Extension Globally..."
 
 # Check if we're in the right directory
 if [ ! -f "package.json" ] || [ ! -f "pyproject.toml" ]; then
@@ -44,12 +44,15 @@ echo "🔨 Building the extension..."
 yarn build:lib:prod
 jupyter labextension build .
 
-echo "🐍 Installing Python package..."
-pip install -e .
+echo "🐍 Installing Python package globally..."
+pip install .
 
-echo "✅ ReproLab installation completed successfully!"
+echo "🔓 Enabling ReproLab extension..."
+jupyter labextension enable reprolab
+
+echo "✅ ReproLab global installation completed successfully!"
 echo ""
-echo "To start JupyterLab with ReproLab:"
+echo "To start JupyterLab with ReproLab from any directory:"
 echo "  jupyter lab"
 echo ""
 echo "The ReproLab panel will appear in the left sidebar." 

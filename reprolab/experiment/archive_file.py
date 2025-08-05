@@ -18,6 +18,8 @@ import datetime
 import os
 import glob
 import pprint
+import pickle
+import time
 
 # Define supported data types for type hints
 SupportedDataTypes = Union[
@@ -27,8 +29,17 @@ SupportedDataTypes = Union[
     dict,
     list,
     xr.Dataset,
-    xr.DataArray
+    xr.DataArray,
+    Any  # Add Any to support generic types via pickle
 ]
+
+# Try to import geopandas for GeoDataFrame support
+try:
+    import geopandas as gpd
+    GeoDataFrame = gpd.GeoDataFrame
+    SupportedDataTypes = Union[SupportedDataTypes, GeoDataFrame]
+except ImportError:
+    GeoDataFrame = None
 
 # Ensure .reprolab_data directory exists
 REPROLAB_DATA_DIR = 'reprolab_data'
@@ -39,14 +50,36 @@ TYPE_MAPPING: Dict[str, Type[SupportedDataTypes]] = {
     'DataFrame': pd.DataFrame,
     'Series': pd.Series,
     'ndarray': np.ndarray,
-    'dict': dict,
-    'list': list,
+    'json': (dict, list),  # Handle both dict and list as JSON
+    'list': list,  # Backward compatibility for legacy files
+    'dict': dict,  # Backward compatibility for legacy files
     'Dataset': xr.Dataset,
-    'DataArray': xr.DataArray
+    'DataArray': xr.DataArray,
+    'pickle': Any  # Generic type for pickle serialization
 }
 
+# Add GeoDataFrame support if available
+if GeoDataFrame is not None:
+    TYPE_MAPPING['GeoDataFrame'] = GeoDataFrame
+
 # Reverse mapping for getting type names
-TYPE_NAME_MAPPING = {v: k for k, v in TYPE_MAPPING.items()}
+TYPE_NAME_MAPPING = {}
+for type_name, type_class in TYPE_MAPPING.items():
+    if isinstance(type_class, tuple):
+        # Handle tuple of types (like json for dict and list)
+        for t in type_class:
+            TYPE_NAME_MAPPING[t] = type_name
+    else:
+        # For backward compatibility, only add if not already mapped
+        if type_class not in TYPE_NAME_MAPPING:
+            TYPE_NAME_MAPPING[type_class] = type_name
+        # If already mapped (e.g., list is mapped to 'json'), keep the primary mapping
+        elif type_name in ['json']:  # Primary mapping takes precedence
+            TYPE_NAME_MAPPING[type_class] = type_name
+
+# Add GeoDataFrame mapping if available
+if GeoDataFrame is not None:
+    TYPE_NAME_MAPPING[GeoDataFrame] = 'GeoDataFrame'
 
 def _get_function_hash(func: Callable, args: tuple, kwargs: dict) -> str:
     """
@@ -82,7 +115,7 @@ def _get_function_hash(func: Callable, args: tuple, kwargs: dict) -> str:
     hash_input = f"{source}{args_str}{kwargs_str}"
     return hashlib.md5(hash_input.encode()).hexdigest()
 
-def persistio(only_local: bool = False) -> Callable:
+def persistio(only_local: bool = False, verbose: bool = False, disable_metadata: bool = False) -> Callable:
     """
     Decorator that caches function results using save_compact and read_compact.
     The cache is based on a hash of the function's source code and its arguments.
@@ -90,104 +123,130 @@ def persistio(only_local: bool = False) -> Callable:
     
     Args:
         only_local: If True, only use local storage. If False, also use cloud storage.
+        verbose: If True, print detailed logging. If False, minimal logging for performance.
+        disable_metadata: If True, skip metadata logging entirely for maximum performance.
     
     Returns:
         Callable: Decorated function that caches its results
     """
     def decorator(func: Callable) -> Callable:
+        # Cache expensive operations at decorator level
+        _cached_aws_env = None
+        
+        def get_cached_aws_env():
+            nonlocal _cached_aws_env
+            if _cached_aws_env is None and not only_local:
+                try:
+                    _cached_aws_env = get_aws_env()
+                except Exception:
+                    _cached_aws_env = None
+            return _cached_aws_env
+        
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             # Calculate hash for this function call
             name_hash = _get_function_hash(func, args, kwargs)
-            print(f"\n[persistio] Function: {func.__name__}")
-            print(f"[persistio] Hash: {name_hash}")
             
-            # Log and record metadata for every persistio trigger
-            try:
-                # Get function source code for code_origin
-                code_origin = inspect.getsource(func)
-                # Get bucket name from AWS environment (if available)
-                bucket_name = None
-                if not only_local:
-                    try:
-                        aws_env = get_aws_env()
-                        bucket_name = aws_env['AWS_BUCKET']
-                    except Exception:
-                        bucket_name = "local_only"
-                else:
-                    bucket_name = "local_only"
-                
-                # Persist metadata for the current notebook
-                persist_metadata_for_current_notebook(name_hash, code_origin, bucket_name)
-                print(f"[persistio] Trigger logged for function: {func.__name__}")
-            except Exception as metadata_error:
-                print(f"[persistio] Failed to log trigger metadata: {str(metadata_error)}")
+            if verbose:
+                print(f"\n[persistio] Function: {func.__name__}")
+                print(f"[persistio] Hash: {name_hash}")
+            
+            # Only log metadata on cache misses to avoid overhead
+            metadata_logged = False
             
             # Try to read from local cache first
             try:
-                print("[persistio] Attempting to load from local cache...")
-                result = read_compact(name_hash)
-                print("[persistio] Successfully loaded from local cache!")
+                if verbose:
+                    print("[persistio] Attempting to load from local cache...")
+                result = read_compact(name_hash, verbose=verbose)
+                if verbose:
+                    print("[persistio] Successfully loaded from local cache!")
                 return result
             except ValueError:
-                print("[persistio] Local cache miss")
+                if verbose:
+                    print("[persistio] Local cache miss")
+                
+                # Log metadata only on cache miss (unless disabled)
+                if not metadata_logged and not disable_metadata:
+                    try:
+                        bucket_name = "local_only"
+                        aws_env = get_cached_aws_env()
+                        if aws_env:
+                            bucket_name = aws_env['AWS_BUCKET']
+                        
+                        persist_metadata_for_current_notebook(name_hash, bucket_name)
+                        if verbose:
+                            print(f"[persistio] Trigger logged for function: {func.__name__}")
+                        metadata_logged = True
+                    except Exception as metadata_error:
+                        if verbose:
+                            print(f"[persistio] Failed to log trigger metadata: {str(metadata_error)}")
             
             # If local cache fails and cloud is enabled, try cloud
             if not only_local:
                 try:
-                    print("[persistio] Attempting to load from cloud...")
-                    # Get AWS credentials
-                    aws_env = get_aws_env()
+                    if verbose:
+                        print("[persistio] Attempting to load from cloud...")
                     
-                    # Initialize S3 client
-                    s3_client = boto3.client(
-                        's3',
-                        aws_access_key_id=aws_env['AWS_ACCESS_KEY_ID'],
-                        aws_secret_access_key=aws_env['AWS_SECRET_ACCESS_KEY']
-                    )
-                    
-                    # List objects in bucket with the hash prefix
-                    response = s3_client.list_objects_v2(
-                        Bucket=aws_env['AWS_BUCKET'],
-                        Prefix=name_hash
-                    )
-                    
-                    # Check if we found any matching files
-                    if 'Contents' in response:
-                        # Get the first matching file
-                        cloud_file = response['Contents'][0]['Key']
-                        print(f"[persistio] Found file in cloud: {cloud_file}")
-                        download_from_cloud(cloud_file)
-                        result = read_compact(name_hash)
-                        print("[persistio] Successfully loaded from cloud!")
-                        return result
-                    else:
-                        print("[persistio] No matching file found in cloud")
+                    aws_env = get_cached_aws_env()
+                    if aws_env:
+                        # Initialize S3 client
+                        s3_client = boto3.client(
+                            's3',
+                            aws_access_key_id=aws_env['AWS_ACCESS_KEY_ID'],
+                            aws_secret_access_key=aws_env['AWS_SECRET_ACCESS_KEY']
+                        )
+                        
+                        # List objects in bucket with the hash prefix
+                        response = s3_client.list_objects_v2(
+                            Bucket=aws_env['AWS_BUCKET'],
+                            Prefix=name_hash
+                        )
+                        
+                        # Check if we found any matching files
+                        if 'Contents' in response:
+                            # Get the first matching file
+                            cloud_file = response['Contents'][0]['Key']
+                            if verbose:
+                                print(f"[persistio] Found file in cloud: {cloud_file}")
+                            download_from_cloud(cloud_file)
+                            result = read_compact(name_hash, verbose=verbose)
+                            if verbose:
+                                print("[persistio] Successfully loaded from cloud!")
+                            return result
+                        else:
+                            if verbose:
+                                print("[persistio] No matching file found in cloud")
                 except Exception as e:
-                    print(f"[persistio] Cloud load failed: {str(e)}")
+                    if verbose:
+                        print(f"[persistio] Cloud load failed: {str(e)}")
             
             # If both local and cloud attempts fail, execute function
-            print("[persistio] Cache miss - executing function...")
+            if verbose:
+                print("[persistio] Cache miss - executing function...")
             result = func(*args, **kwargs)
             
-            # Save result if it's a supported type
-            if isinstance(result, tuple(TYPE_MAPPING.values())):
+            # Save result (now supports all types via pickle fallback)
+            if verbose:
                 print(f"[persistio] Saving result of type {type(result).__name__} to cache...")
-                save_compact(result, name_hash)
+            save_compact(result, name_hash)
+            if verbose:
                 print("[persistio] Successfully saved to local cache!")
-                
-                if not only_local:
-                    try:
-                        # Find the file that was just saved
-                        matching_files = [f for f in os.listdir(REPROLAB_DATA_DIR) if f.startswith(name_hash + '.')]
-                        if matching_files:
-                            cloud_file = matching_files[0]
-                            upload_to_cloud(cloud_file)
+            
+            if not only_local:
+                try:
+                    # Find the file that was just saved - optimize with direct file check
+                    file_pattern = f"{name_hash}.*"
+                    import glob
+                    matching_files = glob.glob(os.path.join(REPROLAB_DATA_DIR, file_pattern))
+                    if matching_files:
+                        cloud_file = os.path.basename(matching_files[0])
+                        upload_to_cloud(cloud_file)
+                        if verbose:
                             print("[persistio] Successfully saved to cloud!")
-                    except Exception as e:
+                except Exception as e:
+                    if verbose:
                         print(f"[persistio] Cloud save failed: {str(e)}")
-            else:
-                print(f"[persistio] Result type {type(result).__name__} not supported for caching")
             
             return result
         
@@ -202,7 +261,7 @@ def _get_extension(data_type: Type[SupportedDataTypes]) -> str:
         data_type: The type of data to get extension for.
     
     Returns:
-        str: The appropriate file extension (e.g., '.parquet', '.npy', '.json.gz', '.nc')
+        str: The appropriate file extension (e.g., '.parquet', '.npy', '.json.gz', '.nc', '.pkl.gz')
     """
     if data_type in (pd.DataFrame, pd.Series):
         return '.parquet'
@@ -212,8 +271,11 @@ def _get_extension(data_type: Type[SupportedDataTypes]) -> str:
         return '.json.gz'
     elif data_type in (xr.Dataset, xr.DataArray):
         return '.nc'
+    elif GeoDataFrame is not None and data_type == GeoDataFrame:
+        return '.gpkg'
     else:
-        raise ValueError(f"Unsupported data type: {data_type}")
+        # For any unsupported type, use pickle with gzip compression
+        return '.pkl.gz'
 
 def save_compact(data: SupportedDataTypes, name_hash: str) -> None:
     """
@@ -221,7 +283,7 @@ def save_compact(data: SupportedDataTypes, name_hash: str) -> None:
     
     Args:
         data: Input data (pandas.DataFrame, pandas.Series, numpy.ndarray, dict, list,
-              xarray.Dataset, or xarray.DataArray).
+              xarray.Dataset, xarray.DataArray, or any other Python object via pickle).
         name_hash: Prefix for the filename. The final filename will be in the format:
                   <name_hash>.<original_type>.<compact_type>
     
@@ -231,17 +293,26 @@ def save_compact(data: SupportedDataTypes, name_hash: str) -> None:
     """
     try:
         original_type = type(data)
-        if original_type not in TYPE_NAME_MAPPING:
-            raise ValueError(f"Unsupported data type: {original_type}. Supported types: {list(TYPE_MAPPING.keys())}")
+        
+        # Check if it's a supported specific type
+        if original_type in TYPE_NAME_MAPPING:
+            original_type_name = TYPE_NAME_MAPPING[original_type]
+        else:
+            # For unsupported types, use generic pickle serialization
+            original_type_name = 'pickle'
             
-        original_type_name = TYPE_NAME_MAPPING[original_type]
         compact_type = _get_extension(original_type).lstrip('.')
         
         file_name = f"{name_hash}.{original_type_name}.{compact_type}"
         file_path = os.path.join(REPROLAB_DATA_DIR, file_name)
         
+        # GeoDataFrame (if available) - check this first to avoid being detected as DataFrame
+        if GeoDataFrame is not None and isinstance(data, GeoDataFrame):
+            # Save as GeoPackage for best compatibility
+            data.to_file(file_path, driver='GPKG')
+        
         # Pandas DataFrame
-        if isinstance(data, pd.DataFrame):
+        elif isinstance(data, pd.DataFrame):
             data.to_parquet(file_path, engine='pyarrow', compression='snappy')
         
         # Pandas Series
@@ -252,34 +323,64 @@ def save_compact(data: SupportedDataTypes, name_hash: str) -> None:
         elif isinstance(data, np.ndarray):
             np.save(file_path, data)
         
-        # Python Dictionary or List
+        # Python Dictionary or List (both handled as JSON)
         elif isinstance(data, (dict, list)):
-            with gzip.open(file_path, 'wt', encoding='utf-8', compresslevel=6) as f:
-                json.dump(data, f)
+            # Check if data contains non-JSON-serializable objects
+            def is_json_serializable(obj):
+                try:
+                    json.dumps(obj)
+                    return True
+                except (TypeError, ValueError):
+                    return False
+            
+            if is_json_serializable(data):
+                # Use JSON for simple dicts/lists
+                with gzip.open(file_path, 'wt', encoding='utf-8', compresslevel=6) as f:
+                    json.dump(data, f)
+            else:
+                # Fall back to pickle for complex dicts/lists
+                with gzip.open(file_path, 'wb', compresslevel=6) as f:
+                    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
         
         # xarray Dataset or DataArray
         elif isinstance(data, (xr.Dataset, xr.DataArray)):
-            data.to_netcdf(file_path, engine='netcdf4', encoding={var: {'zlib': True, 'complevel': 6} for var in data.variables})
+            try:
+                # Try netCDF4 first
+                if isinstance(data, xr.Dataset):
+                    encoding = {var: {'zlib': True, 'complevel': 6} for var in data.variables}
+                else:
+                    # For DataArray, create a Dataset
+                    encoding = {data.name: {'zlib': True, 'complevel': 6}}
+                    data = data.to_dataset()
+                
+                data.to_netcdf(file_path, engine='netcdf4', encoding=encoding)
+            except ImportError:
+                # Fall back to pickle if netCDF4 is not available
+                with gzip.open(file_path, 'wb', compresslevel=6) as f:
+                    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
         
+        # Generic pickle serialization for any other type
         else:
-            raise ValueError(f"Unsupported data type: {type(data)}. Supported types: {list(TYPE_MAPPING.keys())}")
+            with gzip.open(file_path, 'wb', compresslevel=6) as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
         
-        print(f"Data saved compactly to {file_path} ({os.path.getsize(file_path)} bytes)")
+        # Data saved successfully - removed print for performance
     
     except Exception as e:
         raise Exception(f"Error saving data: {str(e)}")
 
-def read_compact(name_hash: str) -> SupportedDataTypes:
+def read_compact(name_hash: str, verbose: bool = False) -> SupportedDataTypes:
     """
     Read a file saved in a compact format back into its original Python data type from the .reprolab_data directory.
     
     Args:
         name_hash: Prefix of the file to read. The function will look for a file matching:
                   <name_hash>.<original_type>.<compact_type>
+        verbose: If True, print detailed logging. If False, minimal logging for performance.
     
     Returns:
         Data in its original Python type (pandas.DataFrame, pandas.Series, numpy.ndarray, dict, list,
-        xarray.Dataset, or xarray.DataArray).
+        xarray.Dataset, xarray.DataArray, or any other Python object via pickle).
     
     Raises:
         ValueError: If file does not exist, format is unsupported, or type is invalid.
@@ -296,54 +397,136 @@ def read_compact(name_hash: str) -> SupportedDataTypes:
     file_name = matching_files[0]
     file_path = os.path.join(REPROLAB_DATA_DIR, file_name)
     
+    if verbose:
+        print(f"[read_compact] Processing file: {file_name}")
+        print(f"[read_compact] File path: {file_path}")
+    
     # Extract original type from filename
-    _, original_type_name, _ = file_name.split('.')
+    # Handle filenames with multiple dots (e.g., test_xml_element.pickle.pkl.gz)
+    parts = file_name.split('.')
+    if verbose:
+        print(f"[read_compact] Filename parts: {parts}")
+        print(f"[read_compact] Number of parts: {len(parts)}")
+    
+    if len(parts) < 3:
+        raise ValueError(f"Invalid filename format: {file_name}")
+    
+    # For files with multiple dots, we need to handle special cases
+    # e.g., "hash.pickle.pkl.gz" -> type is "pickle"
+    # e.g., "hash.DataFrame.parquet" -> type is "DataFrame"
+    if len(parts) >= 4 and parts[1] == 'pickle' and parts[2] == 'pkl':
+        # Special case for pickle files: hash.pickle.pkl.gz
+        original_type_name = 'pickle'
+    else:
+        # Normal case: second part is the type
+        original_type_name = parts[1]
+    
+    if verbose:
+        print(f"[read_compact] Extracted type name: {original_type_name}")
+    
     if original_type_name not in TYPE_MAPPING:
         raise ValueError(f"Unknown type name in filename: {original_type_name}")
     
     original_type = TYPE_MAPPING[original_type_name]
+    if verbose:
+        print(f"[read_compact] Mapped to type: {original_type}")
     
     try:
         # Pandas DataFrame
         if original_type == pd.DataFrame:
+            if verbose:
+                print(f"[read_compact] Reading as DataFrame")
             return pd.read_parquet(file_path, engine='pyarrow')
         
         # Pandas Series
         elif original_type == pd.Series:
+            if verbose:
+                print(f"[read_compact] Reading as Series")
             df = pd.read_parquet(file_path, engine='pyarrow')
             if df.shape[1] != 1:
                 raise ValueError("Parquet file must contain exactly one column for Series")
             return df.iloc[:, 0]
         
+        # GeoDataFrame (if available)
+        elif GeoDataFrame is not None and original_type == GeoDataFrame:
+            if verbose:
+                print(f"[read_compact] Reading as GeoDataFrame")
+            # Use the driver prefix approach
+            return gpd.read_file(f"GPKG:{file_path}")
+        
         # NumPy Array (including Structured Array)
         elif original_type == np.ndarray:
+            if verbose:
+                print(f"[read_compact] Reading as NumPy array")
             return np.load(file_path)
         
-        # Python Dictionary
-        elif original_type == dict:
-            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-                return json.load(f)
-        
-        # Python List
-        elif original_type == list:
-            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-                return json.load(f)
+        # Python Dictionary or List (both handled as JSON)
+        elif original_type in (dict, list) or (isinstance(original_type, tuple) and any(t in (dict, list) for t in original_type)):
+            if verbose:
+                print(f"[read_compact] Reading as JSON (dict/list)")
+            try:
+                # Try JSON first
+                with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                    return json.load(f)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                # Fall back to pickle if JSON fails
+                if verbose:
+                    print(f"[read_compact] JSON failed, trying pickle")
+                with gzip.open(file_path, 'rb') as f:
+                    return pickle.load(f)
         
         # xarray Dataset
         elif original_type == xr.Dataset:
-            return xr.open_dataset(file_path, engine='netcdf4')
+            if verbose:
+                print(f"[read_compact] Reading as xarray Dataset")
+            try:
+                return xr.open_dataset(file_path, engine='netcdf4')
+            except Exception:
+                # Fall back to pickle if netCDF4 fails
+                if file_path.endswith('.gz'):
+                    with gzip.open(file_path, 'rb') as f:
+                        return pickle.load(f)
+                else:
+                    with open(file_path, 'rb') as f:
+                        return pickle.load(f)
         
         # xarray DataArray
         elif original_type == xr.DataArray:
-            ds = xr.open_dataset(file_path, engine='netcdf4')
-            if len(ds.data_vars) != 1:
-                raise ValueError("NetCDF file must contain exactly one variable for DataArray")
-            return ds[list(ds.data_vars.keys())[0]]
+            if verbose:
+                print(f"[read_compact] Reading as xarray DataArray")
+            try:
+                ds = xr.open_dataset(file_path, engine='netcdf4')
+                if len(ds.data_vars) != 1:
+                    raise ValueError("NetCDF file must contain exactly one variable for DataArray")
+                return ds[list(ds.data_vars.keys())[0]]
+            except Exception:
+                # Fall back to pickle if netCDF4 fails
+                if file_path.endswith('.gz'):
+                    with gzip.open(file_path, 'rb') as f:
+                        return pickle.load(f)
+                else:
+                    with open(file_path, 'rb') as f:
+                        return pickle.load(f)
+        
+        # Generic pickle deserialization for any other type
+        elif original_type == Any:  # This handles the 'pickle' type
+            if verbose:
+                print(f"[read_compact] Reading as pickle")
+            # Check if file is gzipped by looking at the extension
+            if file_path.endswith('.gz'):
+                with gzip.open(file_path, 'rb') as f:
+                    return pickle.load(f)
+            else:
+                # Regular pickle file (not gzipped)
+                with open(file_path, 'rb') as f:
+                    return pickle.load(f)
         
         else:
             raise ValueError(f"Unsupported original type: {original_type}. Supported types: {list(TYPE_MAPPING.keys())}")
     
     except Exception as e:
+        if verbose:
+            print(f"[read_compact] Error reading data: {str(e)}")
         raise Exception(f"Error reading data: {str(e)}")
 
 def get_aws_env() -> dict:
@@ -468,67 +651,68 @@ def get_last_changed_notebook():
     except Exception as e:
         raise RuntimeError(f"Error finding last changed notebook: {str(e)}")
 
-def persist_metadata_for_current_notebook(cell_hash, code_origin, bucket_name):
-    notebook_name = get_last_changed_notebook()
-    
+def persist_metadata_for_current_notebook(cell_hash, bucket_name):
+    """
+    Store hashes in the fastest possible format for reading and writing.
+    Uses persistio_hashes.yaml with simple hash list format.
+    """
     try:
-        yaml_filename = f"{notebook_name}_persistio_archive.yaml"
+        yaml_filename = "persistio_hashes.yaml"
         now_iso = datetime.datetime.now(datetime.UTC)
 
+        # Load existing hashes or create new file
+        hashes = set()
         if os.path.exists(yaml_filename):
-            with open(yaml_filename, 'r') as f:
-                metadata = yaml.safe_load(f) or {}
-        else:
-            metadata = {}
+            try:
+                with open(yaml_filename, 'r') as f:
+                    data = yaml.safe_load(f) or {}
+                    hashes = set(data.get('hashes', []))
+            except yaml.YAMLError as e:
+                print(f"⚠️ Warning: Corrupted YAML file detected. Creating backup and starting fresh.")
+                # Create backup of corrupted file
+                backup_filename = f"{yaml_filename}.backup_{int(time.time())}"
+                try:
+                    import shutil
+                    shutil.copy2(yaml_filename, backup_filename)
+                    print(f"📁 Backup created: {backup_filename}")
+                except Exception as backup_error:
+                    print(f"⚠️ Failed to create backup: {backup_error}")
 
-        metadata['jupyter_notebook'] = notebook_name
-        metadata['last_executed'] = now_iso
+        # Add new hash
+        hashes.add(cell_hash)
 
-        if 'creation_data' not in metadata:
-            metadata['creation_data'] = now_iso
+        # Create minimal metadata structure for fastest I/O
+        metadata = {
+            'last_updated': now_iso.isoformat(),
+            'bucket_name': bucket_name,
+            'hashes': sorted(list(hashes))  # Sorted for consistent output
+        }
 
-        if 'bucket_name' not in metadata:
-            metadata['bucket_name'] = bucket_name
-
-        if 'cells_instrumented' not in metadata:
-            metadata['cells_instrumented'] = []
-
-        # Format code_origin properly for YAML
-        formatted_code_origin = pprint.pformat(code_origin.strip(), width=80, depth=None, compact=False)
+        # Write to temporary file first to avoid corruption
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yaml') as temp_file:
+            yaml.dump(metadata, temp_file, sort_keys=False, default_flow_style=False, indent=2)
+            temp_filename = temp_file.name
         
-        existing = next((cell for cell in metadata['cells_instrumented'] if cell['hash'] == cell_hash), None)
-        if existing:
-            existing['code_origin'] = formatted_code_origin
-        else:
-            metadata['cells_instrumented'].append({
-                'hash': cell_hash,
-                'code_origin': formatted_code_origin
-            })
+        # Move temporary file to final location
+        import shutil
+        shutil.move(temp_filename, yaml_filename)
 
-        # Use custom YAML dumper to avoid anchors and format code properly
-        class NoAliasDumper(yaml.SafeDumper):
-            def ignore_aliases(self, data):
-                return True
-        
-        # Custom representer for datetime objects
-        def represent_datetime(dumper, data):
-            return dumper.represent_scalar('tag:yaml.org,2002:str', data.isoformat())
-        
-        # Custom representer for code_origin to preserve formatting
-        def represent_str(dumper, data):
-            if '\n' in data:
-                return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
-            return dumper.represent_scalar('tag:yaml.org,2002:str', data)
-        
-        NoAliasDumper.add_representer(datetime.datetime, represent_datetime)
-        NoAliasDumper.add_representer(str, represent_str)
-
-        with open(yaml_filename, 'w') as f:
-            yaml.dump(metadata, f, Dumper=NoAliasDumper, sort_keys=False, default_flow_style=False, indent=2)
-
-        print(f"✅ Metadata written to {yaml_filename}")
+        print(f"✅ Hash written to {yaml_filename}")
     except Exception as e:
-        print(f"❌ Error persisting metadata: {e}")
+        print(f"❌ Error persisting hash: {e}")
+        # If all else fails, try to write minimal hash list
+        try:
+            minimal_metadata = {
+                'last_updated': now_iso.isoformat(),
+                'bucket_name': bucket_name,
+                'hashes': [cell_hash]
+            }
+            with open(yaml_filename, 'w') as f:
+                yaml.dump(minimal_metadata, f, default_flow_style=False, indent=2)
+            print(f"✅ Minimal hash written to {yaml_filename}")
+        except Exception as minimal_error:
+            print(f"❌ Failed to write even minimal hash: {minimal_error}")
 
 def download_notebook_cache_package(notebook_name: str, output_zip_path: str = None) -> str:
     """
@@ -550,31 +734,19 @@ def download_notebook_cache_package(notebook_name: str, output_zip_path: str = N
     import shutil
     
     try:
-        # Construct the metadata filename - try both with and without .ipynb extension
-        yaml_filename_with_ext = f"{notebook_name}_persistio_archive.yaml"
-        yaml_filename_without_ext = f"{notebook_name.replace('.ipynb', '')}_persistio_archive.yaml"
+        # Use the new hash file format
+        yaml_filename = "persistio_hashes.yaml"
         
-        # Check if metadata file exists (try both variations)
-        yaml_filename = None
-        if os.path.exists(yaml_filename_with_ext):
-            yaml_filename = yaml_filename_with_ext
-        elif os.path.exists(yaml_filename_without_ext):
-            yaml_filename = yaml_filename_without_ext
-        else:
-            # Try to find any matching metadata file
-            possible_files = [f for f in os.listdir('.') if f.endswith('_persistio_archive.yaml')]
-            if possible_files:
-                yaml_filename = possible_files[0]
-                print(f"[download_notebook_cache_package] Found metadata file: {yaml_filename}")
-            else:
-                raise ValueError(f"Metadata file not found. Tried: {yaml_filename_with_ext}, {yaml_filename_without_ext}")
+        # Check if hash file exists
+        if not os.path.exists(yaml_filename):
+            raise ValueError(f"Hash file not found: {yaml_filename}")
         
         # Load metadata
         with open(yaml_filename, 'r') as f:
             metadata = yaml.safe_load(f)
         
-        if not metadata or 'cells_instrumented' not in metadata:
-            raise ValueError(f"No cached data found in metadata file: {yaml_filename}")
+        if not metadata or 'hashes' not in metadata:
+            raise ValueError(f"No cached hashes found in file: {yaml_filename}")
         
         # Create output zip path if not provided
         if output_zip_path is None:
@@ -582,12 +754,12 @@ def download_notebook_cache_package(notebook_name: str, output_zip_path: str = N
             output_zip_path = f"{notebook_name}_cache_package_{timestamp}.zip"
         
         print(f"[download_notebook_cache_package] Processing notebook: {notebook_name}")
-        print(f"[download_notebook_cache_package] Using metadata file: {yaml_filename}")
-        print(f"[download_notebook_cache_package] Found {len(metadata['cells_instrumented'])} cached functions")
+        print(f"[download_notebook_cache_package] Using hash file: {yaml_filename}")
+        print(f"[download_notebook_cache_package] Found {len(metadata['hashes'])} cached hashes")
         
         # Create temporary directory for organizing files
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Copy metadata file to temp directory
+            # Copy hash file to temp directory
             temp_yaml_path = os.path.join(temp_dir, yaml_filename)
             shutil.copy2(yaml_filename, temp_yaml_path)
             
@@ -601,8 +773,7 @@ def download_notebook_cache_package(notebook_name: str, output_zip_path: str = N
             
             # Download each cached file
             downloaded_count = 0
-            for cell_info in metadata['cells_instrumented']:
-                cell_hash = cell_info['hash']
+            for cell_hash in metadata['hashes']:
                 
                 # Check if file exists locally first
                 local_files = [f for f in os.listdir(REPROLAB_DATA_DIR) if f.startswith(cell_hash + '.')]
