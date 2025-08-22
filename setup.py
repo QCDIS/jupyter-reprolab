@@ -47,7 +47,7 @@ setup(
     zip_safe=False,
     entry_points={
         'jupyter_server_extension': [
-            'reprolab = reprolab.server',
+            'reprolab = reprolab.server:load_jupyter_server_extension',
         ],
         'jupyterlab.labextension': [
             'reprolab = reprolab.labextension',

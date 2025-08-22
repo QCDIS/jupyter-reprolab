@@ -121,3 +121,4 @@ dmypy.json
 .yarn/
 
 /reprolab_data/
+/my_venv/
