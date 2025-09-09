@@ -10,6 +10,10 @@ ReproLab is a JupyterLab extension that helps researchers create reproducible ex
 - Data archiving and sharing
 - Zenodo integration for publishing
 
+This extension is composed of a Python package named `reprolab`
+for the server extension and a NPM package named `reprolab`
+for the frontend extension.
+
 ## Requirements
 
 - JupyterLab >= 4.0.0
@@ -66,6 +70,22 @@ To remove the extension, execute:
 pip uninstall reprolab
 ```
 
+## Troubleshoot
+
+If you are seeing the frontend extension, but it is not working, check
+that the server extension is enabled:
+
+```bash
+jupyter server extension list
+```
+
+If the server extension is installed and enabled, but you are not seeing
+the frontend extension, check the frontend extension is installed:
+
+```bash
+jupyter labextension list
+```
+
 ## Contributing
 
 ### Development install
@@ -83,6 +103,8 @@ The `jlpm` command is JupyterLab's pinned version of
 pip install -e "."
 # Link your development version of the extension with JupyterLab
 jupyter labextension develop . --overwrite
+# Server extension must be manually installed in develop mode
+jupyter server extension enable reprolab
 # Rebuild extension Typescript source after making changes
 jlpm build
 ```
@@ -107,6 +129,8 @@ jupyter lab build --minimize=False
 ### Development uninstall
 
 ```bash
+# Server extension must be manually disabled in develop mode
+jupyter server extension disable reprolab
 pip uninstall reprolab
 ```
 

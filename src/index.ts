@@ -78,7 +78,7 @@ class ReprolabSidebarWidget extends Widget {
     super();
     this.app = app;
     this.notebooks = notebooks;
-    
+
     this.initializeWidget();
     this.initializeSections();
     this.render();
@@ -111,7 +111,7 @@ class ReprolabSidebarWidget extends Widget {
   render(): void {
     const container = this.createMainContainer();
     const modal = this.createModal();
-    
+
     this.node.innerHTML = '';
     this.node.appendChild(container);
     document.body.appendChild(modal);
@@ -121,7 +121,7 @@ class ReprolabSidebarWidget extends Widget {
 
   private createMainContainer(): HTMLElement {
     const container = document.createElement('div');
-    
+
     // Header section
     const header = this.createHeader();
     container.appendChild(header);
@@ -157,14 +157,14 @@ class ReprolabSidebarWidget extends Widget {
   private createModal(): HTMLElement {
     const modal = document.createElement('div');
     modal.className = 'reprolab-modal';
-    
+
     const modalContent = document.createElement('div');
     modalContent.className = 'reprolab-modal-content';
-    
+
     const closeButton = document.createElement('span');
     closeButton.className = 'reprolab-modal-close';
     closeButton.textContent = '×';
-    
+
     const modalText = document.createElement('div');
     modalText.innerHTML = `
       <section style="font-size: 16px; line-height: 1.6;">
@@ -187,13 +187,13 @@ class ReprolabSidebarWidget extends Widget {
         </p>
       </section>
     `;
-    
+
     const createPackageButton = createButton(BUTTON_IDS.MODAL_TEST, 'Create Reproducibility Package');
-    
+
     modalContent.appendChild(closeButton);
     modalContent.appendChild(modalText);
     modalContent.appendChild(createPackageButton);
-    
+
     modal.appendChild(modalContent);
     return modal;
   }
@@ -249,7 +249,7 @@ class ReprolabSidebarWidget extends Widget {
 
   private setupCheckboxListeners(): void {
     this.node.querySelectorAll(CHECKBOX_SELECTOR).forEach(cb => {
-      cb.addEventListener('change', (event: Event) => 
+      cb.addEventListener('change', (event: Event) =>
         this.checklistSection.handleCheckboxChange(event)
       );
     });
@@ -284,21 +284,21 @@ class ReprolabSidebarWidget extends Widget {
 
   private handleCreateExperiment(): void {
     console.log('[ReproLab] Creating experiment...');
-    
+
     // Create the experiment
     this.experimentSection.createExperiment();
   }
 
   private handleCreateEnvironment(): void {
     console.log('[ReproLab] Creating environment...');
-    
+
     // Create the environment
     this.environmentSection.createEnvironment();
   }
 
   private handleFreezeDependencies(): void {
     console.log('[ReproLab] Freezing dependencies...');
-    
+
     // Add dependency freeze cell
     this.environmentSection.addFreezeDepsCell();
   }
@@ -322,9 +322,9 @@ function activateReprolab(
   });
 
   // Add the command to the command palette
-  palette.addItem({ 
-    command: REPROLAB_CONFIG.COMMAND, 
-    category: REPROLAB_CONFIG.COMMAND_CATEGORY 
+  palette.addItem({
+    command: REPROLAB_CONFIG.COMMAND,
+    category: REPROLAB_CONFIG.COMMAND_CATEGORY
   });
 
   // Add the sidebar widget (only once)
