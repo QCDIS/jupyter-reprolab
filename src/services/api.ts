@@ -3,7 +3,7 @@
  * Handles communication with the backend server extension
  */
 
-import { getXsrfToken } from '../utils';
+import { requestServer } from './server';
 
 export interface ApiResponse<T = any> {
   status: 'success' | 'error';
@@ -39,27 +39,13 @@ export interface ZenodoData {
 }
 
 class ApiService {
-  private baseUrl: string;
-
-  constructor() {
-    // Get the base URL from JupyterLab and ensure it points to the server extension
-    const jupyterBaseUrl = (window as any).__jupyter_config_data?.baseUrl || '';
-    console.log('[ReproLab API] Jupyter base URL:', jupyterBaseUrl);
-    
-    // The server extension is registered at the root level, not under lab/tree
-    // We need to use the server URL directly
-    const serverUrl = window.location.origin + '/';
-    this.baseUrl = serverUrl;
-    console.log('[ReproLab API] Server base URL:', this.baseUrl);
-  }
-
   private async makeRequest<T>(
     endpoint: string,
     method: 'GET' | 'POST' = 'GET',
     data?: any
   ): Promise<ApiResponse<T>> {
-    const url = `${this.baseUrl}reprolab/api/${endpoint}`;
-    
+    endpoint = `reprolab/api/${endpoint}`;
+
     const options: RequestInit = {
       method,
       headers: {
@@ -67,34 +53,15 @@ class ApiService {
       },
     };
 
-    // Add XSRF token for POST requests
-    if (method === 'POST') {
-      const xsrfToken = getXsrfToken();
-      console.log('[ReproLab API] XSRF Token:', xsrfToken);
-      if (xsrfToken) {
-        options.headers = {
-          ...options.headers,
-          'X-XSRFToken': xsrfToken,
-        };
-      }
-    }
-
     if (data && method === 'POST') {
       options.body = JSON.stringify(data);
     }
 
     try {
-      console.log('[ReproLab API] Making request to:', url);
+      console.log('[ReproLab API] Making request to:', endpoint);
       console.log('[ReproLab API] Headers:', options.headers);
-      const response = await fetch(url, options);
-      const result = await response.json();
-      
-      if (!response.ok) {
-        console.error('[ReproLab API] Request failed:', response.status, result);
-        throw new Error(result.message || `HTTP ${response.status}`);
-      }
-      
-      return result;
+      const { data } = await requestServer<ApiResponse<T>>(endpoint, options);
+      return data;
     } catch (error) {
       console.error(`API request failed for ${endpoint}:`, error);
       throw error;
