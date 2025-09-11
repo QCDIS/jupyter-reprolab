@@ -1,4 +1,6 @@
-import { createSection, getXsrfToken } from '../utils';
+import { createSection } from '../utils';
+import { requestServer } from '../services/server';
+import { JupyterContentApiResponse } from '../services/server';
 
 const CHECKLIST_FILE = 'reprolab_data/reproducibility_checklist.json';
 const DEFAULT_CHECKLIST = [
@@ -53,9 +55,10 @@ export class ChecklistSection {
 
   async loadChecklistState() {
     try {
-      const response = await fetch(`/api/contents/${CHECKLIST_FILE}`);
+      const { response, data } = await requestServer<JupyterContentApiResponse>(
+        `api/contents/${CHECKLIST_FILE}`
+      );
       if (response.ok) {
-        const data = await response.json();
         if (data && data.content) {
           const parsed = JSON.parse(data.content);
           if (typeof parsed === 'object' && parsed !== null) {
@@ -82,12 +85,10 @@ export class ChecklistSection {
 
   async saveChecklistState() {
     try {
-      const xsrfToken = getXsrfToken();
-      await fetch(`/api/contents/${CHECKLIST_FILE}`, {
+      await requestServer(`/api/contents/${CHECKLIST_FILE}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          ...(xsrfToken ? { 'X-XSRFToken': xsrfToken } : {})
         },
         body: JSON.stringify({
           type: 'file',

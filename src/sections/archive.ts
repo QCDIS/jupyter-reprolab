@@ -1,4 +1,6 @@
-import { createSection, getXsrfToken } from '../utils';
+import { createSection } from '../utils';
+import { requestServer } from '../services/server';
+import { JupyterContentApiResponse } from '../services/server';
 import { apiService } from '../services/api';
 
 // Use a relative path to ensure it's created in the current workspace
@@ -81,11 +83,10 @@ export class ArchiveSection {
   private async loadAWSEnv() {
     console.log('[ReproLab Archive] Loading AWS environment...');
     try {
-      const response = await fetch(`/api/contents/${AWS_ENV_FILE}`);
+      const { response, data } = await requestServer<JupyterContentApiResponse>(`/api/contents/${AWS_ENV_FILE}`);
       console.log('[ReproLab Archive] Fetch response status:', response.status);
       
       if (response.ok) {
-        const data = await response.json();
         console.log('[ReproLab Archive] Received data:', data ? 'success' : 'empty');
         
         if (data && data.content) {
@@ -124,12 +125,10 @@ export class ArchiveSection {
   private async saveAWSEnv() {
     console.log('[ReproLab Archive] Saving AWS environment...');
     try {
-      const xsrfToken = getXsrfToken();
-      const response = await fetch(`/api/contents/${AWS_ENV_FILE}`, {
+      const { response } = await requestServer<JupyterContentApiResponse>(`/api/contents/${AWS_ENV_FILE}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          ...(xsrfToken ? { 'X-XSRFToken': xsrfToken } : {})
         },
         body: JSON.stringify({
           type: 'file',
